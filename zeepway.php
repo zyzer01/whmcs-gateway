@@ -1,91 +1,156 @@
 <?php
-if (!defined('WHMCS')) {
-    die('This file cannot be accessed directly.');
+/**
+ * Zeepway Payment Gateway Module for WHMCS
+ * Version: 1.0.0
+ * Build Date: 26 November 2024
+ */
+
+if (!defined("WHMCS")) {
+    die("<!-- Silence is golden. -->");
 }
 
-function zeepway_MetaData() {
-    return [
-        'DisplayName' => 'Zeepway Payment Gateway',
-        'APIVersion' => '1.1',
-    ];
-}
-
-function zeepway_config() {
-    return [
-        'FriendlyName' => [
+/**
+ * Define Zeepway gateway configuration options.
+ *
+ * @return array
+ */
+function zeepway_config()
+{   
+    $isSSL = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || $_SERVER['SERVER_PORT'] == 443);
+    $callbackUrl = 'http' . ($isSSL ? 's' : '') . '://' . $_SERVER['HTTP_HOST'] . 
+        substr(str_replace('/admin/', '/', $_SERVER['REQUEST_URI']), 0, strrpos($_SERVER['REQUEST_URI'], '/')) . 
+        '/modules/gateways/callback/zeepway.php';
+    
+    return array(
+        'FriendlyName' => array(
             'Type' => 'System',
-            'Value' => 'Zeepway Payment Gateway',
-        ],
-        'apiKey' => [
-            'FriendlyName' => 'Public API Key',
+            'Value' => 'Zeepway (Debit/Credit Cards)'
+        ),
+        'webhook' => array(
+            'FriendlyName' => 'Webhook URL',
+            'Type' => 'yesno',
+            'Description' => 'Copy and paste this URL on your Webhook URL settings: <code>' . htmlspecialchars($callbackUrl) . '</code>',
+            'Default' => $callbackUrl,
+        ),
+        'gatewayLogs' => array(
+            'FriendlyName' => 'Gateway logs',
+            'Type' => 'yesno',
+            'Description' => 'Tick to enable gateway logs',
+            'Default' => '0'
+        ),
+        'testMode' => array(
+            'FriendlyName' => 'Test Mode',
+            'Type' => 'yesno',
+            'Description' => 'Tick to enable test mode',
+            'Default' => '0'
+        ),
+        'livePubKey' => array(
+            'FriendlyName' => 'Live Public Key',
             'Type' => 'text',
-            'Size' => '64',
-            'Default' => '',
-            'Description' => 'Enter your Zeepway Public API Key',
-        ],
-        'callbackUrl' => [
-            'FriendlyName' => 'Callback URL',
+            'Size' => '50',
+            'Default' => ''
+        ),
+        'livePrivKey' => array(
+            'FriendlyName' => 'Live Private Key',
             'Type' => 'text',
-            'Size' => '255',
-            'Default' => '',
-            'Description' => 'Enter your callback URL for payment status updates.',
-        ],
-    ];
+            'Size' => '50',
+            'Default' => ''
+        ),
+        'testPubKey' => array(
+            'FriendlyName' => 'Test Public Key',
+            'Type' => 'text',
+            'Size' => '50',
+            'Default' => ''
+        ),
+        'testPrivKey' => array(
+            'FriendlyName' => 'Test Private Key',
+            'Type' => 'text',
+            'Size' => '50',
+            'Default' => ''
+        )
+    );
 }
 
-function zeepway_link($params) {
-    $apiKey = $params['apiKey'];
-    $callbackUrl = $params['callbackUrl'];
+/**
+ * Payment link generation.
+ *
+ * @param array $params Payment Gateway Module Parameters
+ *
+ * @return string
+ */
+function zeepway_link($params)
+{
+    // Client details
+    $email = $params['clientdetails']['email'];
+    $name = $params['clientdetails']['firstname'] . ' ' . $params['clientdetails']['lastname'];
+    
+    // Config Options
+    if ($params['testMode'] == 'on') {
+        $publicKey = $params['testPubKey'];
+        $apiBaseUrl = 'https://staging.zeepjet.com';
+    } else {
+        $publicKey = $params['livePubKey'];
+        $apiBaseUrl = 'https://dashboard.zeepway.com';
+    }
+    
+    // Invoice details
     $invoiceId = $params['invoiceid'];
-    $amount = $params['amount'];
-    $currency = $params['currency'];
-    $clientEmail = $params['clientdetails']['email'];
-    $clientName = $params['clientdetails']['fullname'];
-    $returnUrl = $params['systemurl'] . '/viewinvoice.php?id=' . $invoiceId;
+    $amount = intval(floatval($params['amount']));
+    
+    // Generate unique client reference
+    $clientRef = $invoiceId . '_' . time();
 
-    $uniqueRef = 'INV-' . $invoiceId . '-' . time();
+    // Language
+    $langPayNow = array_key_exists('langpaynow', $params) ? 
+        htmlspecialchars($params['langpaynow']) : 'Pay Now';
 
-    $htmlOutput = <<<HTML
-    <link rel="stylesheet" href="https://dashboard.zeepway.com/zeepway-main.css">
-    <form id="zeepwayPaymentForm">
-        <button type="button" id="payWithZeepway">Pay Now</button>
+    $code = '
+    
+<link rel="stylesheet" href="https://dashboard.zeepway.com/zeepway-main.css"> 
+    
+    <form id="payForm' . $invoiceId . '" target="hiddenIFrame" action="about:blank">
+        <button type="submit" class="btn btn-primary" id="payButton' . $invoiceId . '">' . 
+            $langPayNow . 
+        '</button>
     </form>
-    <script src="https://dashboard.zeepway.com/zeepway.main.js" defer></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/cleave.js/1.6.0/cleave.min.js" defer></script>
+<script src="https://dashboard.zeepway.com/zeepway.main.js" defer> </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cleave.js/1.6.0/cleave.min.js"></script>
     <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            document.getElementById('payWithZeepway').addEventListener('click', function() {
-                // console.log('Initializing Zeepway payment...');
-                
+    document.addEventListener("DOMContentLoaded", function() {
+        // Check if Zeepway library is loaded
+        if (typeof zeepway !== "undefined") {
+            const payForm = document.getElementById("payForm' . $invoiceId . '");
+            const payButton = document.getElementById("payButton' . $invoiceId . '");
+
+            payButton.addEventListener("click", function(e) {
+                e.preventDefault();
+
                 try {
-                    var zeepInstance = new zeepway({
-                        api_key: $apiKey,
-                        amount: $amount,
-                        email: "$clientEmail",
-                        name: "$clientName",
-                        clientRef: "$uniqueRef",
+                    console.log("Trying payment");
+
+                    const zeepwayInstance = new zeepway({
+                        api_key: "' . htmlspecialchars($publicKey) . '",
+                        amount: ' . $amount . ',
+                        email: "' . htmlspecialchars($email) . '",
+                        name: "' . htmlspecialchars($name) . '",
+                        clientRef: "' . htmlspecialchars($clientRef) . '",
                         chargeUser: false,
                         onClose: function() {
-                            console.warn('Payment process was closed by the user.');
-                            alert('Payment process was closed.');
-                        },
-                        onSuccess: function(response) {
-                            console.log('Payment succeeded:', response);
-                        },
-                        // onError: function(error) {
-                        //     console.error('An error occurred:', error);
-                        //     alert('An error occurred during the payment process. Check the console for details.');
-                        // }
+                            console.log("Zeepway modal closed");
+                        }
                     });
-                    zeepInstance.start();
-                } catch (err) {
-                    // console.error('Unexpected error while starting the Zeepway instance:', err);
-                    // alert('An unexpected error occurred. Check the console for details.');
+
+                    zeepwayInstance.start();
+                } catch (error) {
+                    console.error("Zeepway Payment Error:", error);
                 }
             });
-        });
-    </script>
-    HTML;
+        } else {
+            console.error("Zeepway library not loaded properly.");
+        }
+    });
+    </script>';
 
-    return $htmlOutput;
+    return $code;
 }
+?>
